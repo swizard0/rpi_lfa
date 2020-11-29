@@ -81,7 +81,7 @@ impl Mcp3008 {
         let (request_tx, request_rx) = mpsc::sync_channel(0);
         let (event_tx, event_rx) = mpsc::sync_channel(0);
 
-        let builder = thread::Builder::new()
+        let _builder = thread::Builder::new()
             .name("Mcp3008 spi".into())
             .spawn(move || spi_worker(request_rx, event_tx, hz, v_ref))
             .map_err(Error::SpiThreadSpawn)?;
@@ -90,9 +90,6 @@ impl Mcp3008 {
             inner: Inner { request_tx, event_rx, },
         }))
     }
-
-    // pub fn probe(&self) -> Result<Op, Error> {
-    // }
 }
 
 // Initializing
@@ -112,6 +109,8 @@ impl Initializing {
         match self.inner.event_rx.try_recv() {
             Ok(Event::SpiInitialized) =>
                 Ok(InitializingOp::Ready(Ready { inner: self.inner, })),
+            Ok(Event::ChannelRead { .. }) =>
+                unreachable!(),
             Ok(Event::Error(error)) =>
                 Err(error),
             Err(mpsc::TryRecvError::Empty) =>
@@ -119,7 +118,6 @@ impl Initializing {
             Err(mpsc::TryRecvError::Disconnected) =>
                 Err(Error::SpiThreadLost),
         }
-
     }
 
 }
@@ -143,19 +141,8 @@ impl From<Ready> for Mcp3008 {
 
 impl Ready {
     pub fn probe_channel(self, channel: Channel) -> Probing {
-        let channel_value = match channel {
-            Channel::Ch0 => 0,
-            Channel::Ch1 => 1,
-            Channel::Ch2 => 2,
-            Channel::Ch3 => 3,
-            Channel::Ch4 => 4,
-            Channel::Ch5 => 5,
-            Channel::Ch6 => 6,
-            Channel::Ch7 => 7,
-        };
         Probing {
-            channel_value,
-            state: ProbingState::Request,
+            state: ProbingState::Request { channel, },
             inner: self.inner,
         }
     }
@@ -164,7 +151,6 @@ impl Ready {
 // Probing
 
 pub struct Probing {
-    channel_value: u8,
     state: ProbingState,
     inner: Inner,
 }
@@ -176,21 +162,55 @@ impl From<Probing> for Mcp3008 {
 }
 
 enum ProbingState {
-    Request,
+    Request { channel: Channel, },
+    WaitingReply,
 }
 
 impl Probing {
-    pub fn poll(self) -> Result<ProbingOp, Error> {
-
-        Ok(ProbingOp::Idle(self))
+    pub fn poll(mut self) -> Result<ProbingOp, Error> {
+        loop {
+            match self.state {
+                ProbingState::Request { channel, } =>
+                    match self.inner.request_tx.try_send(Request::ProbeChannel { channel, }) {
+                        Ok(()) =>
+                            self.state = ProbingState::WaitingReply,
+                        Err(mpsc::TrySendError::Full(..)) =>
+                            return Ok(ProbingOp::Idle(self)),
+                        Err(mpsc::TrySendError::Disconnected(..)) =>
+                            return Err(Error::SpiThreadLost),
+                    },
+                ProbingState::WaitingReply =>
+                    match self.inner.event_rx.try_recv() {
+                        Ok(Event::SpiInitialized) =>
+                            unreachable!(),
+                        Ok(Event::ChannelRead { channel, value, }) =>
+                            return Ok(ProbingOp::Done {
+                                channel,
+                                value,
+                                ready: Ready { inner: self.inner, },
+                            }),
+                        Ok(Event::Error(error)) =>
+                            return Err(error),
+                        Err(mpsc::TryRecvError::Empty) =>
+                            return Ok(ProbingOp::Idle(self)),
+                        Err(mpsc::TryRecvError::Disconnected) =>
+                            return Err(Error::SpiThreadLost),
+                    }
+            }
+        }
     }
 }
 
 pub enum ProbingOp {
     Idle(Probing),
+    Done {
+        channel: Channel,
+        value: Volt,
+        ready: Ready,
+    },
 }
 
-// impl
+// inner impl
 
 struct Inner {
     request_tx: mpsc::SyncSender<Request>,
@@ -198,10 +218,12 @@ struct Inner {
 }
 
 enum Request {
+    ProbeChannel { channel: Channel, },
 }
 
 enum Event {
     SpiInitialized,
+    ChannelRead { channel: Channel, value: Volt, },
     Error(Error),
 }
 
@@ -221,31 +243,35 @@ fn spi_worker_loop(
 {
     let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, hz, Mode::Mode0)
         .map_err(Error::SpiInitialize)?;
+    let mut buffer: [u8; 3] = [0, 0, 0];
 
-// struct Inner {
-//     spi: Spi,
-//     v_ref: Volt,
-//     buffer: [u8; 3],
-// }
+    event_tx.send(Event::SpiInitialized)
+        .or_else(|mpsc::SendError(..)| Ok(()))?;
 
-    unimplemented!()
+    loop {
+        match request_rx.recv() {
+            Ok(Request::ProbeChannel { channel, }) => {
+                let channel_value = match channel {
+                    Channel::Ch0 => 0,
+                    Channel::Ch1 => 1,
+                    Channel::Ch2 => 2,
+                    Channel::Ch3 => 3,
+                    Channel::Ch4 => 4,
+                    Channel::Ch5 => 5,
+                    Channel::Ch6 => 6,
+                    Channel::Ch7 => 7,
+                };
+                spi.transfer_segments(
+                    &[Segment::new(&mut buffer, &[0b00000001, 0b10000000 | (channel_value << 4), 0b00000000])],
+                ).map_err(Error::SpiTransferSegments)?;
+                let data = ((buffer[1] & 0b00000011) as u16) << 8 | (buffer[2] as u16);
+                let value = Volt(data as f64 * v_ref.0 / 1024.0);
+
+                event_tx.send(Event::ChannelRead { channel, value, })
+                    .or_else(|mpsc::SendError(..)| Ok(()))?;
+            },
+            Err(mpsc::RecvError) =>
+                return Ok(()),
+        }
+    }
 }
-
-//     pub fn value(&mut self, channel: Channel) -> Result<Volt, Error> {
-//         let channel_value = match channel {
-//             Channel::Ch0 => 0,
-//             Channel::Ch1 => 1,
-//             Channel::Ch2 => 2,
-//             Channel::Ch3 => 3,
-//             Channel::Ch4 => 4,
-//             Channel::Ch5 => 5,
-//             Channel::Ch6 => 6,
-//             Channel::Ch7 => 7,
-//         };
-//         self.inner.spi.transfer_segments(
-//             &[Segment::new(&mut self.inner.buffer, &[0b00000001, 0b10000000 | (channel_value << 4), 0b00000000])],
-//         ).map_err(Error::SpiTransferSegments)?;
-//         let data = ((self.inner.buffer[1] & 0b00000011) as u16) << 8 | (self.inner.buffer[2] as u16);
-//         Ok(Volt(data as f64 * self.inner.v_ref.0 / 1024.0))
-//     }
-// }
