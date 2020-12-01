@@ -14,7 +14,7 @@ use rppal::spi::{
 
 use super::Volt;
 
-pub enum Mcp3008 {
+pub enum Session {
     Initializing(Initializing),
     Ready(Ready),
     Probing(Probing),
@@ -58,7 +58,7 @@ pub enum Error {
     SpiTransferSegments(rppal::spi::Error),
 }
 
-impl Mcp3008 {
+impl Session {
     pub fn new(params: &Params) -> Result<Self, Error> {
         let hz = match params.voltage_drain {
             Vdd::Positive3v3 =>
@@ -86,7 +86,7 @@ impl Mcp3008 {
             .spawn(move || spi_worker(request_rx, event_tx, hz, v_ref))
             .map_err(Error::SpiThreadSpawn)?;
 
-        Ok(Mcp3008::Initializing(Initializing {
+        Ok(Session::Initializing(Initializing {
             inner: Inner { request_tx, event_rx, },
         }))
     }
@@ -98,9 +98,9 @@ pub struct Initializing {
     inner: Inner,
 }
 
-impl From<Initializing> for Mcp3008 {
-    fn from(state: Initializing) -> Mcp3008 {
-        Mcp3008::Initializing(state)
+impl From<Initializing> for Session {
+    fn from(state: Initializing) -> Session {
+        Session::Initializing(state)
     }
 }
 
@@ -133,9 +133,9 @@ pub struct Ready {
     inner: Inner,
 }
 
-impl From<Ready> for Mcp3008 {
-    fn from(state: Ready) -> Mcp3008 {
-        Mcp3008::Ready(state)
+impl From<Ready> for Session {
+    fn from(state: Ready) -> Session {
+        Session::Ready(state)
     }
 }
 
@@ -155,9 +155,9 @@ pub struct Probing {
     inner: Inner,
 }
 
-impl From<Probing> for Mcp3008 {
-    fn from(state: Probing) -> Mcp3008 {
-        Mcp3008::Probing(state)
+impl From<Probing> for Session {
+    fn from(state: Probing) -> Session {
+        Session::Probing(state)
     }
 }
 
