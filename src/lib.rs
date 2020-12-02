@@ -1,6 +1,9 @@
 
 pub mod mcp3008;
-pub mod freq_driver;
+pub mod ac_driver;
 
 #[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
 pub struct Volt(pub f64);
+
+#[derive(Clone, Copy, PartialEq, PartialOrd, Debug)]
+pub struct Hertz(pub f64);
