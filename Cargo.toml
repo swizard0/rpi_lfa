@@ -1,12 +1,9 @@
 [package]
 name = "rpi_lfa"
-version = "0.1.5"
+version = "0.1.6"
 authors = ["Alexey Voznyuk <me@swizard.info>"]
-description = "RaspberryPi tools for loop free architecture framework"
+description = "RaspberryPi tools for loop free architecture framework (base)"
 edition = "2018"
-
-[dependencies]
-rppal = "^0.11"
 
 [dev-dependencies]
 rand = "^0.7"
