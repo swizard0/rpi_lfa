@@ -196,3 +196,33 @@ struct Reading {
     value: Volt,
     when: Instant,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{
+        Duration,
+    };
+
+    use crate::{
+        Volt,
+        Hertz,
+        ac_driver::{
+            Reading,
+            Session,
+        },
+    };
+
+    fn noised_signal_gen(amplitude: Volt, freq: Hertz, noise_fraq: f64, duration: Duration) -> Vec<Reading> {
+        unimplemented!()
+    }
+
+    #[test]
+    fn accurate_50hz() {
+        let session = Session::new();
+    }
+
+    #[test]
+    fn noisy_100hz() {
+        let session = Session::new();
+    }
+}
