@@ -285,8 +285,8 @@ mod tests {
     fn accurate_50hz() {
         let signal = noised_signal_gen(Volt(3.3), Hertz(50.0), 0.1, Duration::from_micros(100000), 100);
         let mut session = Session::new();
-        let mut hz_sum = 0.0;
-        let mut hz_total = 0;
+        let mut hzs = Vec::new();
+        let mut last_when = None;
         for reading in signal {
             session = match session {
                 Session::Initializing(state) =>
@@ -297,8 +297,10 @@ mod tests {
                             session.into(),
                     },
                 Session::Estimated(state) => {
-                    hz_total += 1;
-                    hz_sum += state.values.frequency.0;
+                    if last_when.map_or(true, |when| when < state.values.taken_at) {
+                        hzs.push(state.values.frequency);
+                        last_when = Some(state.values.taken_at);
+                    }
                     match state.voltage_read(reading.when, reading.value) {
                         EstimatedOp::Idle(session) =>
                             session.into(),
@@ -308,9 +310,12 @@ mod tests {
                 },
             }
         }
-        let avg_hz = hz_sum / hz_total as f64;
-        assert!(avg_hz > 40.0, "average frequency is {} but expected to be 40 < x < 60", avg_hz);
-        assert!(avg_hz < 60.0, "average frequency is {} but expected to be 40 < x < 60", avg_hz);
+        assert!(!hzs.is_empty());
+        hzs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let hzs_total = hzs.len();
+        let mid_hz = hzs[hzs_total / 2];
+        assert!(mid_hz.0 > 30.0, "median frequency is {:?} but expected to be 30 < x < 70, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 < 70.0, "median frequency is {:?} but expected to be 30 < x < 70, hzs: {:?}", mid_hz, hzs);
     }
 
     #[test]
