@@ -1,6 +1,6 @@
 [package]
 name = "rpi_lfa"
-version = "0.1.7"
+version = "0.1.8"
 authors = ["Alexey Voznyuk <me@swizard.info>"]
 description = "RaspberryPi tools for loop free architecture framework (base)"
 edition = "2018"

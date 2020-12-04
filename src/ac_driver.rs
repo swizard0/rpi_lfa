@@ -25,6 +25,7 @@ impl Session {
     pub fn new() -> Self {
         Session::Initializing(Initializing {
             tick_state: TickState::Bootstrap,
+            first_tick_skipped: false,
         })
     }
 }
@@ -33,6 +34,7 @@ impl Session {
 
 pub struct Initializing {
     tick_state: TickState,
+    first_tick_skipped: bool,
 }
 
 impl From<Initializing> for Session {
@@ -45,7 +47,12 @@ impl Initializing {
     pub fn voltage_read(self, when: Instant, value: Volt) -> InitializingOp {
         match self.tick_state.next(Reading { when, value, }) {
             TickStateOp::Reset(tick_state) | TickStateOp::Idle(tick_state) =>
-                InitializingOp::Idle(Initializing { tick_state, }),
+                InitializingOp::Idle(Initializing { tick_state, ..self }),
+            TickStateOp::Tick { tick_state, .. } if !self.first_tick_skipped =>
+                InitializingOp::Idle(Initializing {
+                    tick_state,
+                    first_tick_skipped: true,
+                }),
             TickStateOp::Tick { tick_state, frequency, } =>
                 InitializingOp::CarrierDetected(Estimated {
                     values: Values { taken_at: when, frequency, },
@@ -81,7 +88,7 @@ impl Estimated {
     pub fn voltage_read(self, when: Instant, value: Volt) -> EstimatedOp {
         match self.tick_state.next(Reading { when, value, }) {
             TickStateOp::Reset(tick_state) =>
-                EstimatedOp::CarrierLost(Initializing { tick_state, }),
+                EstimatedOp::CarrierLost(Initializing { tick_state, first_tick_skipped: false, }),
             TickStateOp::Idle(tick_state) =>
                 EstimatedOp::Idle(Estimated { values: self.values, tick_state, }),
             TickStateOp::Tick { tick_state, frequency, } =>
@@ -110,6 +117,7 @@ enum TickState {
     PeriodMeasureDown { range: Range, },
 }
 
+#[derive(Debug)]
 enum TickStateOp {
     Reset(TickState),
     Idle(TickState),
@@ -159,10 +167,10 @@ impl TickState {
                     if tick_duration >= range_duration {
                         let frequency = Hertz(0.5 / range_duration.as_secs_f64()); // half of a period
                         TickStateOp::Tick {
-                            tick_state: TickState::RangeDetect {
+                            tick_state: TickState::PeriodMeasureDown {
                                 range: Range {
-                                    min: reading,
                                     max: reading,
+                                    ..range
                                 },
                             },
                             frequency,
@@ -186,7 +194,7 @@ impl TickState {
                     range.min = reading;
                     TickStateOp::Idle(TickState::PeriodMeasureDown { range, })
                 } else if reading.value > range.max.value {
-                    range.min = reading;
+                    range.max = reading;
                     TickStateOp::Idle(TickState::RangeExpandToMax { range, })
                 } else {
                     let tick_duration = reading.when.duration_since(range.max.when);
@@ -194,10 +202,10 @@ impl TickState {
                     if tick_duration >= range_duration {
                         let frequency = Hertz(0.5 / range_duration.as_secs_f64()); // half of a period
                         TickStateOp::Tick {
-                            tick_state: TickState::RangeDetect {
+                            tick_state: TickState::PeriodMeasureUp {
                                 range: Range {
                                     min: reading,
-                                    max: reading,
+                                    ..range
                                 },
                             },
                             frequency,
@@ -283,7 +291,7 @@ mod tests {
 
     #[test]
     fn accurate_50hz() {
-        let signal = noised_signal_gen(Volt(3.3), Hertz(50.0), 0.1, Duration::from_micros(100000), 100);
+        let signal = noised_signal_gen(Volt(3.3), Hertz(50.0), 0.025, Duration::from_micros(100_000), 1000);
         let mut session = Session::new();
         let mut hzs = Vec::new();
         let mut last_when = None;
@@ -314,12 +322,50 @@ mod tests {
         hzs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let hzs_total = hzs.len();
         let mid_hz = hzs[hzs_total / 2];
-        assert!(mid_hz.0 > 30.0, "median frequency is {:?} but expected to be 30 < x < 70, hzs: {:?}", mid_hz, hzs);
-        assert!(mid_hz.0 < 70.0, "median frequency is {:?} but expected to be 30 < x < 70, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 > 45.0, "mid frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 < 55.0, "mid frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", mid_hz, hzs);
+        let avg_hz = Hertz(hzs.iter().map(|hz| hz.0).sum::<f64>() / hzs_total as f64);
+        assert!(avg_hz.0 > 45.0, "avg frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", avg_hz, hzs);
+        assert!(avg_hz.0 < 55.0, "avg frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", avg_hz, hzs);
     }
 
     #[test]
     fn noisy_100hz() {
-        let session = Session::new();
+        let signal = noised_signal_gen(Volt(3.3), Hertz(100.0), 0.1, Duration::from_micros(100_000), 1000);
+        let mut session = Session::new();
+        let mut hzs = Vec::new();
+        let mut last_when = None;
+        for reading in signal {
+            session = match session {
+                Session::Initializing(state) =>
+                    match state.voltage_read(reading.when, reading.value) {
+                        InitializingOp::Idle(session) =>
+                            session.into(),
+                        InitializingOp::CarrierDetected(session) =>
+                            session.into(),
+                    },
+                Session::Estimated(state) => {
+                    if last_when.map_or(true, |when| when < state.values.taken_at) {
+                        hzs.push(state.values.frequency);
+                        last_when = Some(state.values.taken_at);
+                    }
+                    match state.voltage_read(reading.when, reading.value) {
+                        EstimatedOp::Idle(session) =>
+                            session.into(),
+                        EstimatedOp::CarrierLost(session) =>
+                            session.into(),
+                    }
+                },
+            }
+        }
+        assert!(!hzs.is_empty());
+        hzs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let hzs_total = hzs.len();
+        let mid_hz = hzs[hzs_total / 2];
+        assert!(mid_hz.0 > 90.0, "mid frequency is {:?} but expected to be 90 < x < 110, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 < 110.0, "mid frequency is {:?} but expected to be 90 < x < 110, hzs: {:?}", mid_hz, hzs);
+        let avg_hz = Hertz(hzs.iter().map(|hz| hz.0).sum::<f64>() / hzs_total as f64);
+        assert!(avg_hz.0 > 80.0, "avg frequency is {:?} but expected to be 80 < x < 120, hzs: {:?}", avg_hz, hzs);
+        assert!(avg_hz.0 < 120.0, "avg frequency is {:?} but expected to be 80 < x < 120, hzs: {:?}", avg_hz, hzs);
     }
 }
