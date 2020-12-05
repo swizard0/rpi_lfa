@@ -273,6 +273,7 @@ mod tests {
         noise_fraq: f64,
         duration: Duration,
         samples: usize,
+        force_abs: bool,
     )
         -> Vec<Reading>
     {
@@ -286,8 +287,12 @@ mod tests {
                 let wave_arg = 2.0 * std::f64::consts::PI * freq.0 * time;
                 let wave_fun = amplitude.0 * wave_arg.sin();
                 let noise = rng.gen_range(-noise_amplitude, noise_amplitude);
+                let mut value = wave_fun + noise;
+                if force_abs {
+                    value = value.abs();
+                }
                 Reading {
-                    value: Volt(wave_fun + noise),
+                    value: Volt(value),
                     when: now + Duration::from_secs_f64(time),
                 }
             })
@@ -298,7 +303,7 @@ mod tests {
 
     #[test]
     fn accurate_50hz() {
-        let signal = noised_signal_gen(Volt(3.3), Hertz(50.0), 0.025, Duration::from_micros(100_000), 1000);
+        let signal = noised_signal_gen(Volt(3.3), Hertz(50.0), 0.025, Duration::from_micros(100_000), 1000, false);
         let mut session = Session::new();
         let mut hzs = Vec::new();
         let mut last_when = None;
@@ -331,14 +336,16 @@ mod tests {
         let mid_hz = hzs[hzs_total / 2];
         assert!(mid_hz.0 > 45.0, "mid frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", mid_hz, hzs);
         assert!(mid_hz.0 < 55.0, "mid frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", mid_hz, hzs);
-        let avg_hz = Hertz(hzs.iter().map(|hz| hz.0).sum::<f64>() / hzs_total as f64);
+        let part4 = hzs_total / 4;
+        let hzs_middle = &hzs[part4 .. part4 * 3];
+        let avg_hz = Hertz(hzs_middle.iter().map(|hz| hz.0).sum::<f64>() / hzs_middle.len() as f64);
         assert!(avg_hz.0 > 45.0, "avg frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", avg_hz, hzs);
         assert!(avg_hz.0 < 55.0, "avg frequency is {:?} but expected to be 45 < x < 55, hzs: {:?}", avg_hz, hzs);
     }
 
     #[test]
-    fn noisy_100hz() {
-        let signal = noised_signal_gen(Volt(3.3), Hertz(100.0), 0.1, Duration::from_micros(100_000), 2000);
+    fn accurate_100hz_abs() {
+        let signal = noised_signal_gen(Volt(3.3), Hertz(50.0), 0.025, Duration::from_micros(10000000), 100000, true);
         let mut session = Session::new();
         let mut hzs = Vec::new();
         let mut last_when = None;
@@ -369,7 +376,49 @@ mod tests {
         hzs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let hzs_total = hzs.len();
         let mid_hz = hzs[hzs_total / 2];
-        assert!(mid_hz.0 > 90.0, "mid frequency is {:?} but expected to be 90 < x < 110, hzs: {:?}", mid_hz, hzs);
-        assert!(mid_hz.0 < 110.0, "mid frequency is {:?} but expected to be 90 < x < 110, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 > 92.0, "mid frequency is {:?} but expected to be 92 < x < 108, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 < 108.0, "mid frequency is {:?} but expected to be 92 < x < 108, hzs: {:?}", mid_hz, hzs);
+        let part4 = hzs_total / 4;
+        let hzs_middle = &hzs[part4 .. part4 * 3];
+        let avg_hz = Hertz(hzs_middle.iter().map(|hz| hz.0).sum::<f64>() / hzs_middle.len() as f64);
+        assert!(avg_hz.0 > 90.0, "avg frequency is {:?} but expected to be 90 < x < 110, hzs: {:?}", avg_hz, hzs);
+        assert!(avg_hz.0 < 110.0, "avg frequency is {:?} but expected to be 90 < x < 110, hzs: {:?}", avg_hz, hzs);
+    }
+
+    #[test]
+    fn noisy_100hz() {
+        let signal = noised_signal_gen(Volt(3.3), Hertz(100.0), 0.1, Duration::from_micros(100_000), 2000, false);
+        let mut session = Session::new();
+        let mut hzs = Vec::new();
+        let mut last_when = None;
+        for reading in signal {
+            session = match session {
+                Session::Initializing(state) =>
+                    match state.voltage_read(reading.when, reading.value) {
+                        InitializingOp::Idle(session) =>
+                            session.into(),
+                        InitializingOp::CarrierDetected(session) =>
+                            session.into(),
+                    },
+                Session::Estimated(state) => {
+                    if last_when.map_or(true, |when| when < state.values.taken_at) {
+                        hzs.push(state.values.frequency);
+                        last_when = Some(state.values.taken_at);
+                    }
+                    match state.voltage_read(reading.when, reading.value) {
+                        EstimatedOp::Idle(session) =>
+                            session.into(),
+                        EstimatedOp::CarrierLost(session) =>
+                            session.into(),
+                    }
+                },
+            }
+        }
+        assert!(!hzs.is_empty());
+        hzs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let hzs_total = hzs.len();
+        let mid_hz = hzs[hzs_total / 2];
+        assert!(mid_hz.0 > 88.0, "mid frequency is {:?} but expected to be 88 < x < 112, hzs: {:?}", mid_hz, hzs);
+        assert!(mid_hz.0 < 112.0, "mid frequency is {:?} but expected to be 88 < x < 112, hzs: {:?}", mid_hz, hzs);
     }
 }
